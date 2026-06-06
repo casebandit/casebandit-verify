@@ -1,0 +1,12 @@
+{
+  "layout": "asic-e-style",
+  "tsa_qualified": false,
+  "chain_tip_composition": "H_i = SHA256(H_{i-1} + '|' + payloadCipher + '|' + routingHmac); genesis = 64 zero chars",
+  "canonical_spec_present": "jcs-rfc8785-v2",
+  "hash_algo": "sha256",
+  "files": {
+    "report/a.txt": "97e023eb2d8b45e2708aa06a513e49a1e6fd06522b287eef94d955e1f200c49b",
+    "report/b.txt": "ad653c62394647683edacf5b002740478881092925df0fa5c9ff6dd912a08631"
+  },
+  "package_hash": "deec1337b6da6b979072c9399227f8c727e970861e77abeddfa8b9edaef6461e"
+}

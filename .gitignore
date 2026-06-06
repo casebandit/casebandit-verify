@@ -1,0 +1,5 @@
+node_modules/
+*.log
+.DS_Store
+# verify.html is a BUILT artifact but is committed (its SHA-256 is pinned in the
+# README for reproducibility). Do NOT ignore it.

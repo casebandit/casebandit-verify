@@ -1,0 +1,11 @@
+casebandit-verify
+Copyright 2026 CaseBandit
+
+This product includes algorithm leaves vendored verbatim (content-hash-pinned)
+from the CaseBandit application source. See README.md "Vendored-leaf content-hash
+pins". The vendored leaves are the forensic chain-tip composition, canonical
+ledger sort, RFC 3161 messageImprint containment check, the JCS RFC 8785
+canonicalizer, and the row-HMAC message builder.
+
+This product depends on tweetnacl (https://github.com/dchest/tweetnacl-js),
+which is released into the public domain.

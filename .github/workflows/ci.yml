@@ -1,0 +1,53 @@
+name: ci
+
+# Reproducible, offline-by-construction CI. NO network is used by the verifier
+# itself; npm install fetches deps from the registry, after which every job step
+# runs offline. The no-network test asserts the runtime makes zero network calls.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # openssl is preinstalled on ubuntu-latest; assert it for the RFC 3161 path.
+      - name: assert toolchain
+        run: |
+          node --version
+          openssl version
+
+      - name: install (locked)
+        run: npm ci
+
+      - name: typecheck
+        run: npm run typecheck
+
+      - name: header-pin presence
+        run: npm run verify:pins
+
+      - name: test (golden vectors + 5 court fixtures)
+        run: npm test
+
+      - name: no-network gate
+        run: npm run test:no-network
+
+      - name: verify.html build is reproducible (matches committed SHA-256)
+        run: |
+          BEFORE=$(sha256sum verify.html | cut -d' ' -f1)
+          npm run build:web
+          AFTER=$(sha256sum verify.html | cut -d' ' -f1)
+          echo "committed: $BEFORE"
+          echo "rebuilt:   $AFTER"
+          test "$BEFORE" = "$AFTER" || { echo "verify.html drifted from the committed build"; exit 1; }

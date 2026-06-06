@@ -1,0 +1,31 @@
+{
+  "name": "casebandit-verify",
+  "version": "1.0.0",
+  "description": "Standalone offline forensic verifier for the CaseBandit audit-ledger Court Package. Public method, never any case data. Two layers: keyless (chain-tip + RFC 3161 TSA + MANIFEST) and keyed (--key, per-row HMAC chain).",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "casebandit-verify": "./verify.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build:web": "node build-web.mjs",
+    "build:fixtures": "tsx test/build-fixtures.mjs",
+    "verify": "tsx verify.ts",
+    "verify:pins": "node verify-pins.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts",
+    "test:no-network": "tsx --test test/no-network.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "esbuild": "0.27.2",
+    "tsx": "4.22.4",
+    "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "tweetnacl": "1.0.3"
+  }
+}
