@@ -1,5 +1,31 @@
 node_modules/
 *.log
 .DS_Store
+
 # verify.html is a BUILT artifact but is committed (its SHA-256 is pinned in the
 # README for reproducibility). Do NOT ignore it.
+
+# --- Private-material guard (defensive; this public repo must never carry secrets) ---
+# Private keys / key material
+*.key
+*.pem.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_ed25519
+id_ecdsa
+*_rsa
+*_ed25519
+# Env / credential files
+.env
+.env.*
+.npmrc
+*.secret
+secrets.*
+credentials.json
+# NOTE: .pem / .crt / .der are intentionally NOT ignored — this repo commits the
+# PUBLIC Sectigo CA bundle (ca/) and PUBLIC test certs / RFC3161 tokens (fixtures/).
+# Private signer keys are generated only in a temp dir by test/build-fixtures.mjs
+# and are never written under the repo.
