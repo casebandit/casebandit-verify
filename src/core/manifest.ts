@@ -90,7 +90,15 @@ export interface ManifestValidationResult {
   missingFromManifest: string[];
   /** Files in the manifest absent from the provided package entries. */
   missingFromPackage: string[];
-  /** True iff the recomputed package_hash matches the manifest's. */
+  /**
+   * True iff `computePackageHash(manifest.files)` equals `manifest.package_hash`.
+   * This is a SELF-CONSISTENCY check of the manifest only — it recomputes the
+   * package hash from the manifest's OWN declared file map, NOT from real file
+   * bytes. It catches a manifest whose `package_hash` field was edited without
+   * updating `files` (or vice-versa), but proves NOTHING about whether the
+   * packaged files match their declared hashes. Real integrity needs `entries`
+   * (the actual bytes) → `mismatched`/`missingFrom*`/`ok`.
+   */
   packageHashOk: boolean;
   expectedPackageHash: string;
   actualPackageHash: string;

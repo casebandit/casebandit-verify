@@ -66,11 +66,85 @@ function parseArgs(argv: string[]): CliArgs {
   return out;
 }
 
-/** Accept either `{ rows }` (legacy) or `{ auditLedger }` (JsonExportData). */
+/**
+ * Exit codes (kept DISTINCT so a caller scripting on $? can tell them apart):
+ *   0 — clean (no positive tamper signal)
+ *   1 — TAMPER detected (tsa/chain/manifest failed, or declared tip mismatch)
+ *   2 — operational / input error (bad usage, unreadable or malformed evidence)
+ * A forensic tool MUST fail-closed: malformed input is exit 2, never a silent
+ * pass and never collapsed into the exit-1 tamper signal.
+ */
+const EXIT_TAMPER = 1;
+const EXIT_ERROR = 2;
+
+/** Operational/input error → clear message + exit 2 (never a raw stack trace). */
+function fail(msg: string): never {
+  console.error(`casebandit-verify: ${msg}`);
+  process.exit(EXIT_ERROR);
+}
+
+/** Read + parse a JSON file, failing closed with a clear message on any error. */
+function readJsonFile(path: string, label: string): unknown {
+  let text: string;
+  try {
+    text = readFileSync(resolve(path), 'utf8');
+  } catch (err) {
+    return fail(`cannot read ${label} '${path}': ${(err as Error).message}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    return fail(`${label} '${path}' is not valid JSON: ${(err as Error).message}`);
+  }
+}
+
+const ROW_STRING_FIELDS = [
+  'caseId',
+  'deviceId',
+  'payloadCipher',
+  'payloadNonce',
+  'routingHmac',
+  'canonicalSpec',
+  'hashAlgo',
+] as const;
+const ROW_NUMBER_FIELDS = ['deviceSeq', 'clientTs', 'keyEpoch'] as const;
+
+/**
+ * Fail-closed structural validation of the untrusted ledger BEFORE any hashing or
+ * sorting. Without it a string `clientTs`/`deviceSeq` yields NaN comparisons and a
+ * nondeterministic canonical sort (→ unstable, divergent chain tip), and a missing
+ * field surfaces as an opaque downstream crash instead of a clear verdict.
+ */
+function assertLedgerRows(rows: unknown): asserts rows is LedgerRow[] {
+  if (!Array.isArray(rows)) fail('ledger is not an array');
+  rows.forEach((row, i) => {
+    if (row === null || typeof row !== 'object') fail(`ledger row ${i} is not an object`);
+    const r = row as Record<string, unknown>;
+    for (const f of ROW_STRING_FIELDS) {
+      if (typeof r[f] !== 'string') fail(`ledger row ${i}: field '${f}' must be a string (got ${typeof r[f]})`);
+    }
+    for (const f of ROW_NUMBER_FIELDS) {
+      if (typeof r[f] !== 'number' || !Number.isFinite(r[f])) {
+        fail(`ledger row ${i}: field '${f}' must be a finite number (got ${typeof r[f]})`);
+      }
+    }
+    if (typeof r.ephemeral !== 'boolean') fail(`ledger row ${i}: field 'ephemeral' must be a boolean (got ${typeof r.ephemeral})`);
+  });
+}
+
+/**
+ * Accept either `{ rows }` (legacy) or `{ auditLedger }` (JsonExportData). A
+ * present-but-empty array is allowed (an empty chain is legitimately unanchored).
+ * An export with NEITHER field is malformed/stripped evidence → fail-closed (a
+ * missing ledger must never read as a clean pass).
+ */
 function extractRows(parsed: RawInput): LedgerRow[] {
-  if (Array.isArray(parsed.rows)) return parsed.rows;
-  if (Array.isArray(parsed.auditLedger)) return parsed.auditLedger;
-  return [];
+  const hasRows = Object.prototype.hasOwnProperty.call(parsed, 'rows');
+  const hasLedger = Object.prototype.hasOwnProperty.call(parsed, 'auditLedger');
+  if (hasRows && Array.isArray(parsed.rows)) return parsed.rows;
+  if (hasLedger && Array.isArray(parsed.auditLedger)) return parsed.auditLedger;
+  if (hasRows || hasLedger) fail("export has a 'rows'/'auditLedger' field that is not an array");
+  return fail("export has no 'rows' or 'auditLedger' ledger array — cannot verify (malformed or stripped evidence)");
 }
 
 /** Read a token file as base64 (raw DER → base64; an already-base64 file passes through). */
@@ -103,30 +177,65 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
-  const parsed = JSON.parse(readFileSync(resolve(args.in), 'utf8')) as RawInput;
+  const parsedRaw = readJsonFile(args.in, 'export (--in)');
+  if (parsedRaw === null || typeof parsedRaw !== 'object' || Array.isArray(parsedRaw)) {
+    fail('export (--in) must be a JSON object');
+  }
+  const parsed = parsedRaw as RawInput;
   const rows = extractRows(parsed);
+  assertLedgerRows(rows);
+  const declaredTip =
+    typeof parsed.chainTipHash === 'string' && /^[0-9a-fA-F]{64}$/.test(parsed.chainTipHash)
+      ? parsed.chainTipHash.toLowerCase()
+      : null;
+  if (parsed.chainTipHash !== undefined && declaredTip === null) {
+    fail("export 'chainTipHash' is present but is not a 64-char hex string");
+  }
   const tsaTokenBase64 = args.token ? readTokenBase64(args.token) : parsed.tsaTokenBase64 ?? null;
 
   // ---- Layer 1: keyless chain-tip + TSA ----
   const tsaResult = await verifyExport({ rows, tsaTokenBase64, caFile: args.ca });
 
+  // ---- Declared-tip anchor: bind the export's self-declared chainTipHash to the
+  //      recomputed tip. The recomputed tip binds payloadCipher + routingHmac, so a
+  //      mismatch means the rows do not produce the declared tip = tamper. This makes
+  //      the previously-unused chainTipHash an active anchor (catches e.g. a v1
+  //      payloadCipher swap left with a stale declared tip, even when unstamped). ----
+  const tipMatch: 'match' | 'mismatch' | 'not-declared' =
+    declaredTip === null ? 'not-declared' : declaredTip === tsaResult.chainTip.toLowerCase() ? 'match' : 'mismatch';
+
   // ---- Optional MANIFEST check (still Layer 1, keyless file-hash only) ----
-  let manifest: { status: 'verified' | 'failed' | 'not-provided'; detail?: ManifestValidationResult } = {
-    status: 'not-provided',
-  };
+  let manifest: {
+    status: 'verified' | 'failed' | 'self-consistent' | 'not-provided';
+    detail?: ManifestValidationResult;
+  } = { status: 'not-provided' };
   if (args.manifest) {
-    const m = JSON.parse(readFileSync(resolve(args.manifest), 'utf8')) as ManifestSchema;
-    // With --package-dir: recompute every file's SHA-256 from the real packaged
-    // bytes and re-derive the package_hash → catches a flipped packaged byte,
-    // an added/removed file, AND a tampered manifest. Without it: validate the
-    // manifest's internal package_hash consistency only (catches a tampered
-    // package_hash field but not a silently-swapped file).
-    const entries = args.packageDir
-      ? readPackageEntries(resolve(args.packageDir))
-      : entriesFromManifestFiles(m);
-    const detail = validateManifest(m, entries);
-    const ok = args.packageDir ? detail.ok : detail.packageHashOk;
-    manifest = { status: ok ? 'verified' : 'failed', detail };
+    const mRaw = readJsonFile(args.manifest, 'manifest (--manifest)');
+    if (mRaw === null || typeof mRaw !== 'object' || Array.isArray(mRaw)) {
+      fail('manifest (--manifest) must be a JSON object');
+    }
+    const m = mRaw as ManifestSchema;
+    if (m.files === null || typeof m.files !== 'object' || Array.isArray(m.files)) {
+      fail("manifest (--manifest): 'files' must be an object map of path → sha256hex");
+    }
+    if (typeof m.package_hash !== 'string') {
+      fail("manifest (--manifest): 'package_hash' must be a string");
+    }
+    if (args.packageDir) {
+      // With --package-dir: recompute every file's SHA-256 from the REAL packaged
+      // bytes and re-derive the package_hash → catches a flipped packaged byte, an
+      // added/removed file, AND a tampered manifest. Only this mode yields 'verified'.
+      const detail = validateManifest(m, readPackageEntries(resolve(args.packageDir)));
+      manifest = { status: detail.ok ? 'verified' : 'failed', detail };
+    } else {
+      // WITHOUT --package-dir there are no real bytes to hash, so we can ONLY check
+      // the manifest is internally self-consistent (its package_hash field matches
+      // its own declared files map). This proves NOTHING about whether the packaged
+      // files match their declared hashes, so it is reported as 'self-consistent'
+      // (NOT 'verified', NOT a tamper) — supply --package-dir for real integrity.
+      const detail = validateManifest(m, {});
+      manifest = { status: detail.packageHashOk ? 'self-consistent' : 'failed', detail };
+    }
   }
 
   // ---- Layer 2: keyed chain verify (opt-in) ----
@@ -147,6 +256,8 @@ async function main(): Promise<void> {
 
   const output = {
     chainTip: tsaResult.chainTip,
+    declaredChainTip: declaredTip,
+    tipMatch,
     rowCount: tsaResult.rowCount,
     tsa: tsaResult.tsa as TsaVerdict,
     tsaDetail: tsaResult.detail,
@@ -160,6 +271,7 @@ async function main(): Promise<void> {
     console.log(JSON.stringify(output, null, 2));
   } else {
     console.log(`chain_tip: ${output.chainTip}`);
+    if (output.tipMatch !== 'not-declared') console.log(`declared_tip: ${output.tipMatch}`);
     console.log(`rows: ${output.rowCount}`);
     console.log(`tsa: ${output.tsa}`);
     if (output.tsaDetail) console.log(`tsa_detail: ${output.tsaDetail.trim()}`);
@@ -171,12 +283,14 @@ async function main(): Promise<void> {
   }
 
   // Exit non-zero ONLY on a positive tamper signal. unstamped / indeterminate /
-  // not-attempted are NOT failures and must never be collapsed into a failure.
+  // not-attempted / self-consistent are NOT failures and must never be collapsed
+  // into one. A declared-tip mismatch IS a tamper signal (rows ≠ declared tip).
   const tamper =
     output.tsa === 'failed' ||
     output.manifest === 'failed' ||
-    output.chain === 'failed';
-  process.exit(tamper ? 1 : 0);
+    output.chain === 'failed' ||
+    output.tipMatch === 'mismatch';
+  process.exit(tamper ? EXIT_TAMPER : 0);
 }
 
 /**
@@ -202,16 +316,7 @@ function readPackageEntries(dir: string): Record<string, Uint8Array> {
   return out;
 }
 
-/**
- * Without a package directory, build the entries map from the manifest's own
- * declared file hashes so `validateManifest` can confirm internal consistency
- * (package_hash recompute + no added/removed). This cannot catch a swapped file
- * byte (no real bytes) but DOES catch a tampered package_hash / file map.
- * Implemented by feeding each declared hash back as a pre-hashed sentinel: we
- * instead return an empty map so only `packageHashOk` is consulted by the caller.
- */
-function entriesFromManifestFiles(_m: ManifestSchema): Record<string, Uint8Array> {
-  return {};
-}
-
-void main();
+// Fail-closed at the top level: any unexpected error (unreadable token/key file,
+// openssl missing, etc.) becomes a clear exit-2 operational error, never an
+// unhandled-rejection stack trace that an examiner could mistake for a tamper.
+main().catch((err: unknown) => fail(err instanceof Error ? err.message : String(err)));

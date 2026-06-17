@@ -28,14 +28,20 @@ export interface WebVerifyOutput {
    *   attests-tip   — token contains this tip's messageImprint (containment ok)
    *   unstamped     — no token present
    *   no-attestation — a token is present but does NOT attest this tip (mismatch)
-   * NOTE: 'attests-tip' is NOT a full signature/CA verdict; run the CLI for that.
+   * NOTE: 'attests-tip' is a CONTAINMENT HEURISTIC, NOT proof the TSA signed this
+   * tip. It only asserts the bytes `04 20 || SHA256(tip)` appear somewhere in the
+   * unsigned token, so a crafted token that embeds those bytes outside the real
+   * messageImprint can spoof it. Binding attestation needs the RFC 3161 signature
+   * + CA-chain + EKU + genTime checks — run the CLI for that.
    */
   tsaContainment: 'attests-tip' | 'unstamped' | 'no-attestation';
   note: string;
 }
 
 const CLI_NOTE =
-  'For full RFC 3161 signature / CA-chain / genTime validation run the CLI: ' +
+  "'attests-tip' is a containment heuristic (token bytes include this tip's " +
+  'imprint), not a verified signature — a crafted token can spoof it. For binding ' +
+  'RFC 3161 signature / CA-chain / EKU / genTime validation run the CLI: ' +
   'node verify.js --in <export.json> --token <token.tsr> --ca <ca.pem>';
 
 export async function verifyKeylessWeb(input: WebVerifyInput): Promise<WebVerifyOutput> {

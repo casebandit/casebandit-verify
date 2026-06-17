@@ -51,7 +51,17 @@ Both tri-state verdicts are kept **separate and verbatim** in the output — the
 |---------|----------|------------------------------------|
 | `tsa`   | `verified` \| `unstamped` \| `failed` | `unstamped` = no token (unanchored, **NOT** a failure) |
 | `chain` | `verified` \| `indeterminate` \| `failed` | `indeterminate` = key material unavailable (cold/offline, **NOT** tamper) |
-| `manifest` | `verified` \| `failed` \| `not-provided` | — |
+| `manifest` | `verified` \| `self-consistent` \| `failed` \| `not-provided` | `self-consistent` = `--manifest` given **without** `--package-dir`: only the manifest's internal `package_hash` was checked, **NOT** the real file bytes (supply `--package-dir` for `verified`) |
+
+If the export carries a `chainTipHash`, it is bound to the recomputed tip: a
+`declared_tip: mismatch` (rows do not produce the declared tip) is a **tamper**
+signal.
+
+**Exit codes** (a caller can script on `$?`): `0` = clean · `1` = tamper
+(`tsa`/`chain`/`manifest` `failed`, or `declared_tip` mismatch) · `2` =
+operational/input error (bad usage, unreadable or malformed evidence). Malformed
+input is **always** exit 2 — it is never silently passed nor collapsed into the
+exit-1 tamper signal.
 
 ---
 

@@ -76,7 +76,9 @@ function parseGenTimeEpoch(tstInfoPath: string): number | null {
  *   1. signature is cryptographically valid (`cms -verify -noverify`);
  *   2. the token's messageImprint attests the LOCAL recomputed tip (containment
  *      of `04 20 || SHA256(rawTip)`);
- *   3. the signer cert chains to the bundled CA and is valid AS OF genTime.
+ *   3. the signer cert chains to the bundled CA, carries the RFC 3161
+ *      id-kp-timeStamping EKU (`-purpose timestampsign`), and is valid AS OF
+ *      genTime.
  * Only all three together upgrade the verdict to `verified` — fail-closed.
  */
 function verifyAsOfGenTime(tokenPath: string, caFile: string, rawTip: Buffer, dir: string): { ok: boolean; detail: string } {
@@ -99,7 +101,11 @@ function verifyAsOfGenTime(tokenPath: string, caFile: string, rawTip: Buffer, di
   try {
     execFileSync(
       'openssl',
-      ['cms', '-verify', '-inform', 'DER', '-in', tokenPath, '-CAfile', caFile, '-purpose', 'any', '-attime', String(epoch), '-out', join(dir, 'attime-out.der')],
+      // `-purpose timestampsign` enforces the id-kp-timeStamping EKU during chain
+      // building, so a non-TSA cert that merely chains to the bundled CA cannot be
+      // accepted as a timestamp signer (Tier-1 `ts -verify` enforces this already;
+      // the Tier-2 fallback MUST NOT silently drop it via `-purpose any`).
+      ['cms', '-verify', '-inform', 'DER', '-in', tokenPath, '-CAfile', caFile, '-purpose', 'timestampsign', '-attime', String(epoch), '-out', join(dir, 'attime-out.der')],
       { stdio: 'pipe' },
     );
   } catch (err) {
