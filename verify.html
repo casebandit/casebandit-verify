@@ -108,7 +108,7 @@
   }
 
   // src/core/web-core.ts
-  var CLI_NOTE = "For full RFC 3161 signature / CA-chain / genTime validation run the CLI: node verify.js --in <export.json> --token <token.tsr> --ca <ca.pem>";
+  var CLI_NOTE = "'attests-tip' is a containment heuristic (token bytes include this tip's imprint), not a verified signature \u2014 a crafted token can spoof it. For binding RFC 3161 signature / CA-chain / EKU / genTime validation run the CLI: node verify.js --in <export.json> --token <token.tsr> --ca <ca.pem>";
   async function verifyKeylessWeb(input) {
     const chainTip = await computeChainTipHash(input.rows);
     const rowCount = input.rows.length;

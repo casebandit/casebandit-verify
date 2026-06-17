@@ -21,9 +21,12 @@
   },
   "devDependencies": {
     "@types/node": "22.10.2",
-    "esbuild": "0.27.2",
+    "esbuild": "0.28.1",
     "tsx": "4.22.4",
     "typescript": "5.9.3"
+  },
+  "overrides": {
+    "esbuild": "0.28.1"
   },
   "dependencies": {
     "tweetnacl": "1.0.3"
