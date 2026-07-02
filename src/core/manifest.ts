@@ -23,6 +23,21 @@ import { createHash } from 'node:crypto';
 export const MANIFEST_PATH = 'META-INF/MANIFEST.json';
 export const MIMETYPE_PATH = 'mimetype';
 
+/**
+ * Own-property lookup that is IMMUNE to prototype pollution. Filenames are
+ * attacker-controlled: a file (or manifest entry) literally named `toString`,
+ * `constructor`, `hasOwnProperty`, `__proto__`, etc. inherits from
+ * `Object.prototype`, so a plain `key in obj` / `obj[key]` would treat it as
+ * present and silently bypass tamper detection. Every lookup over a
+ * filename-keyed map in this file MUST go through these helpers.
+ */
+function hasOwn(obj: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+function getOwn<T>(map: Record<string, T>, key: string): T | undefined {
+  return hasOwn(map, key) ? map[key] : undefined;
+}
+
 export interface ManifestSchema {
   layout: 'asic-e-style';
   tsa_qualified: false;
@@ -118,7 +133,7 @@ export function validateManifest(
   const missingFromManifest: string[] = [];
 
   for (const [path, expected] of Object.entries(manifest.files)) {
-    const bytes = entries[path];
+    const bytes = getOwn(entries, path);
     if (bytes === undefined) {
       missingFromPackage.push(path);
       continue;
@@ -128,7 +143,10 @@ export function validateManifest(
 
   for (const path of Object.keys(entries)) {
     if (path === MIMETYPE_PATH || path === MANIFEST_PATH) continue;
-    if (!(path in manifest.files)) missingFromManifest.push(path);
+    // hasOwn (NOT `path in manifest.files`): a package file named e.g. `toString`
+    // must be reported as an unexpected extra file, not treated as expected via a
+    // property inherited from Object.prototype — that would bypass tamper detection.
+    if (!hasOwn(manifest.files, path)) missingFromManifest.push(path);
   }
 
   const actualPackageHash = computePackageHash(manifest.files);

@@ -24,7 +24,7 @@
  * Requires Node >= 20 (crypto.subtle global) and `openssl` on PATH for Layer-1
  * RFC 3161 validation. The keyless web verifier (verify.html) needs neither.
  */
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, lstatSync } from 'node:fs';
 import { resolve, join, relative } from 'node:path';
 import { verifyExport, nodeSupportsSubtleGlobal, type TsaVerdict } from './src/core/tsa-verify.ts';
 import { verifyChain, type ChainVerifyResult } from './src/core/chain-verify.ts';
@@ -83,11 +83,24 @@ function fail(msg: string): never {
   process.exit(EXIT_ERROR);
 }
 
+/**
+ * Hard upper bound on any JSON evidence file (ledger export, manifest) we load
+ * fully into memory. A malicious or corrupt package could otherwise hand the
+ * verifier a multi-gigabyte file and exhaust memory (DoS). 64 MiB is far above
+ * any realistic court-package ledger yet small enough to reject an abuse.
+ */
+const MAX_JSON_BYTES = 64 * 1024 * 1024;
+
 /** Read + parse a JSON file, failing closed with a clear message on any error. */
 function readJsonFile(path: string, label: string): unknown {
+  const abs = resolve(path);
   let text: string;
   try {
-    text = readFileSync(resolve(path), 'utf8');
+    const size = statSync(abs).size;
+    if (size > MAX_JSON_BYTES) {
+      return fail(`${label} '${path}' is ${size} bytes, which exceeds the ${MAX_JSON_BYTES}-byte (64 MiB) cap — refusing to load (possible resource-exhaustion attack)`);
+    }
+    text = readFileSync(abs, 'utf8');
   } catch (err) {
     return fail(`cannot read ${label} '${path}': ${(err as Error).message}`);
   }
@@ -294,23 +307,42 @@ async function main(): Promise<void> {
 }
 
 /**
- * Recursively read every file under `dir` into a `{ relPath -> bytes }` map,
- * using forward-slash POSIX paths to match the MANIFEST's path keys.
+ * Recursively read every REGULAR file under `dir` into a `{ relPath -> bytes }`
+ * map, using forward-slash POSIX paths to match the MANIFEST's path keys.
+ *
+ * Hardened against a crafted `--package-dir`:
+ *   • `lstatSync` (never `statSync`) so we inspect the entry ITSELF, not its
+ *     target. Any symlink is rejected up front — a symlink could point at
+ *     `/dev/zero` (unbounded read → hang), escape the package root, or form a
+ *     cycle (infinite walk). Refusing them removes all three DoS vectors.
+ *   • Non-regular special files (block/char device, FIFO, socket) are rejected
+ *     too — reading them can block indefinitely.
+ *   • The map uses a null prototype so a file literally named `__proto__`,
+ *     `constructor`, etc. cannot pollute the prototype chain of the entries map
+ *     handed to `validateManifest`.
+ * Because every symlink is refused, no cycle or root-escape can occur.
  */
 function readPackageEntries(dir: string): Record<string, Uint8Array> {
-  const out: Record<string, Uint8Array> = {};
+  const root = resolve(dir);
+  const out: Record<string, Uint8Array> = Object.create(null);
   const walk = (cur: string): void => {
     for (const name of readdirSync(cur)) {
       const full = join(cur, name);
-      if (statSync(full).isDirectory()) {
+      const st = lstatSync(full);
+      const rel = relative(root, full).split(/[\\/]/).join('/');
+      if (st.isSymbolicLink()) {
+        fail(`--package-dir contains a symlink ('${rel}') — refusing to follow it (a crafted package could point at a device, escape the package, or form a cycle)`);
+      }
+      if (st.isDirectory()) {
         walk(full);
-      } else {
-        const rel = relative(dir, full).split(/[\\/]/).join('/');
+      } else if (st.isFile()) {
         out[rel] = new Uint8Array(readFileSync(full));
+      } else {
+        fail(`--package-dir contains a special file ('${rel}') that is not a regular file — refusing to read it`);
       }
     }
   };
-  walk(dir);
+  walk(root);
   // The MANIFEST file itself is never hashed; drop it if it sits in the tree.
   delete out[MANIFEST_PATH];
   return out;
