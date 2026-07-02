@@ -24,7 +24,7 @@
  * Requires Node >= 20 (crypto.subtle global) and `openssl` on PATH for Layer-1
  * RFC 3161 validation. The keyless web verifier (verify.html) needs neither.
  */
-import { readFileSync, readdirSync, statSync, lstatSync } from 'node:fs';
+import { readFileSync, readdirSync, lstatSync } from 'node:fs';
 import { resolve, join, relative } from 'node:path';
 import { verifyExport, nodeSupportsSubtleGlobal, type TsaVerdict } from './src/core/tsa-verify.ts';
 import { verifyChain, type ChainVerifyResult } from './src/core/chain-verify.ts';
@@ -91,14 +91,25 @@ function fail(msg: string): never {
  */
 const MAX_JSON_BYTES = 64 * 1024 * 1024;
 
+/** Per-file and cumulative byte budgets for a `--package-dir` tree (regular files
+ *  pass the special-file guard, so these are the only resource bound on reads). */
+const MAX_PACKAGE_FILE_BYTES = 64 * 1024 * 1024; // 64 MiB per file
+const MAX_PACKAGE_TOTAL_BYTES = 512 * 1024 * 1024; // 512 MiB total
+
 /** Read + parse a JSON file, failing closed with a clear message on any error. */
 function readJsonFile(path: string, label: string): unknown {
   const abs = resolve(path);
   let text: string;
   try {
-    const size = statSync(abs).size;
-    if (size > MAX_JSON_BYTES) {
-      return fail(`${label} '${path}' is ${size} bytes, which exceeds the ${MAX_JSON_BYTES}-byte (64 MiB) cap — refusing to load (possible resource-exhaustion attack)`);
+    // lstat (not stat): a symlink/device/FIFO/socket reports size 0 and would slip
+    // under the byte cap, then readFileSync on /dev/zero loops to OOM or blocks
+    // forever on a FIFO with no writer. Reject any non-regular file up front.
+    const st = lstatSync(abs);
+    if (!st.isFile()) {
+      return fail(`${label} '${path}' is not a regular file (symlink/device/FIFO/socket rejected)`);
+    }
+    if (st.size > MAX_JSON_BYTES) {
+      return fail(`${label} '${path}' is ${st.size} bytes, which exceeds the ${MAX_JSON_BYTES}-byte (64 MiB) cap — refusing to load (possible resource-exhaustion attack)`);
     }
     text = readFileSync(abs, 'utf8');
   } catch (err) {
@@ -325,6 +336,7 @@ async function main(): Promise<void> {
 function readPackageEntries(dir: string): Record<string, Uint8Array> {
   const root = resolve(dir);
   const out: Record<string, Uint8Array> = Object.create(null);
+  let totalBytes = 0;
   const walk = (cur: string): void => {
     for (const name of readdirSync(cur)) {
       const full = join(cur, name);
@@ -336,6 +348,17 @@ function readPackageEntries(dir: string): Record<string, Uint8Array> {
       if (st.isDirectory()) {
         walk(full);
       } else if (st.isFile()) {
+        // Per-file and cumulative byte budgets: a single multi-GB regular file (or
+        // a package of many large files) would otherwise be read fully into memory
+        // → OOM. Regular files pass the special-file guard, so this is the only
+        // resource bound on the package tree.
+        if (st.size > MAX_PACKAGE_FILE_BYTES) {
+          return void fail(`--package-dir file '${rel}' is ${st.size} bytes, exceeding the ${MAX_PACKAGE_FILE_BYTES}-byte per-file cap — refusing to read (possible resource-exhaustion attack)`);
+        }
+        totalBytes += st.size;
+        if (totalBytes > MAX_PACKAGE_TOTAL_BYTES) {
+          return void fail(`--package-dir total content exceeds the ${MAX_PACKAGE_TOTAL_BYTES}-byte cap — refusing to read (possible resource-exhaustion attack)`);
+        }
         out[rel] = new Uint8Array(readFileSync(full));
       } else {
         fail(`--package-dir contains a special file ('${rel}') that is not a regular file — refusing to read it`);

@@ -78,8 +78,13 @@ function readTlv(buf: Buffer, offset: number): DerTlv {
     const n = length & 0x7f;
     if (n === 0 || n > 4) throw new Error('unsupported DER length');
     if (i + n > buf.length) throw new Error('truncated DER length');
+    // Use multiplication, not `<< 8`: a 4-byte length with the high bit set (e.g.
+    // 0x84 80 00 00 00) would overflow the signed int32 `<<` into a NEGATIVE
+    // length, making `end = i + length` land below `i` and pass the overrun check
+    // with an empty/backwards range. Multiplication keeps it a positive JS number
+    // (max 0xFFFFFFFF, well under 2^53); the overrun guard below then rejects it.
     length = 0;
-    for (let k = 0; k < n; k++) length = (length << 8) | buf[i++];
+    for (let k = 0; k < n; k++) length = length * 0x100 + buf[i++];
   }
   const end = i + length;
   if (end > buf.length) throw new Error('DER content overruns buffer');
